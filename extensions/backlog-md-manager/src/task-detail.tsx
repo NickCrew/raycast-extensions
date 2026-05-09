@@ -2,25 +2,9 @@ import { Detail, ActionPanel, Action, Icon, Color, showToast, Toast } from "@ray
 import { usePromise } from "@raycast/utils";
 import { runBacklog } from "./backlog";
 import EditTask from "./edit-task";
-
-export interface TaskData {
-  id: string;
-  title: string;
-  status: string;
-  priority: string;
-  created: string;
-  labels: string[];
-  milestone: string;
-  assignee: string;
-  description: string;
-  acceptanceCriteria: string[];
-  definitionOfDone: string[];
-  dependencies: string[];
-  references: string[];
-  documentation: string[];
-  notes: string;
-  filePath: string;
-}
+import { OpenBrowserAction } from "./open-browser";
+import { getProjectConfig, getProjectName } from "./preferences";
+import { loadTask, TaskData } from "./task-data";
 
 const PRIORITY_COLORS: Record<string, Color> = {
   high: Color.Red,
@@ -34,134 +18,6 @@ const QUICK_STATUSES = [
   { title: "Done", value: "done", icon: Icon.CheckCircle },
   { title: "Blocked", value: "blocked", icon: Icon.XMarkCircle },
 ];
-
-export function parseTaskView(output: string): TaskData {
-  const task: TaskData = {
-    id: "",
-    title: "",
-    status: "",
-    priority: "",
-    created: "",
-    labels: [],
-    milestone: "",
-    assignee: "",
-    description: "",
-    acceptanceCriteria: [],
-    definitionOfDone: [],
-    dependencies: [],
-    references: [],
-    documentation: [],
-    notes: "",
-    filePath: "",
-  };
-
-  const lines = output.split("\n");
-  let currentSection = "";
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const trimmed = line.trim();
-
-    if (trimmed.startsWith("File:")) {
-      task.filePath = trimmed.replace("File:", "").trim();
-      continue;
-    }
-
-    if (trimmed.startsWith("Task ") && trimmed.includes(" - ")) {
-      const titleMatch = trimmed.match(/^Task\s+([\w-]+)\s+-\s+(.+)$/);
-      if (titleMatch) {
-        task.id = titleMatch[1];
-        task.title = titleMatch[2];
-      }
-      continue;
-    }
-
-    if (trimmed.match(/^=+$/) || trimmed.match(/^-+$/)) continue;
-
-    if (trimmed === "Description:") {
-      currentSection = "description";
-      continue;
-    }
-    if (trimmed === "Acceptance Criteria:") {
-      currentSection = "ac";
-      continue;
-    }
-    if (trimmed === "Definition of Done:") {
-      currentSection = "dod";
-      continue;
-    }
-    if (trimmed === "Implementation Notes:") {
-      currentSection = "notes";
-      continue;
-    }
-    if (trimmed === "Dependencies:") {
-      currentSection = "dependencies";
-      continue;
-    }
-    if (trimmed === "References:") {
-      currentSection = "references";
-      continue;
-    }
-    if (trimmed === "Documentation:") {
-      currentSection = "documentation";
-      continue;
-    }
-
-    if (trimmed.startsWith("Status:")) {
-      task.status = trimmed
-        .replace("Status:", "")
-        .replace(/[○●◐✕]/g, "")
-        .trim();
-      continue;
-    }
-    if (trimmed.startsWith("Priority:")) {
-      task.priority = trimmed.replace("Priority:", "").trim().toLowerCase();
-      continue;
-    }
-    if (trimmed.startsWith("Created:")) {
-      task.created = trimmed.replace("Created:", "").trim();
-      continue;
-    }
-    if (trimmed.startsWith("Labels:")) {
-      task.labels = trimmed
-        .replace("Labels:", "")
-        .trim()
-        .split(",")
-        .map((l) => l.trim())
-        .filter(Boolean);
-      continue;
-    }
-    if (trimmed.startsWith("Milestone:")) {
-      task.milestone = trimmed.replace("Milestone:", "").trim();
-      continue;
-    }
-    if (trimmed.startsWith("Assignee:")) {
-      task.assignee = trimmed.replace("Assignee:", "").trim();
-      continue;
-    }
-
-    if (currentSection === "description" && trimmed) {
-      task.description += (task.description ? "\n" : "") + trimmed;
-    }
-    if (currentSection === "notes" && trimmed) {
-      task.notes += (task.notes ? "\n" : "") + trimmed;
-    }
-    if ((currentSection === "ac" || currentSection === "dod") && trimmed.startsWith("- [")) {
-      (currentSection === "ac" ? task.acceptanceCriteria : task.definitionOfDone).push(trimmed);
-    }
-    if (currentSection === "dependencies" && trimmed.startsWith("-")) {
-      task.dependencies.push(trimmed.replace(/^-\s*/, ""));
-    }
-    if (currentSection === "references" && trimmed.startsWith("-")) {
-      task.references.push(trimmed.replace(/^-\s*/, ""));
-    }
-    if (currentSection === "documentation" && trimmed.startsWith("-")) {
-      task.documentation.push(trimmed.replace(/^-\s*/, ""));
-    }
-  }
-
-  return task;
-}
 
 function buildMarkdown(task: TaskData): string {
   const parts: string[] = [];
@@ -184,9 +40,19 @@ function buildMarkdown(task: TaskData): string {
     parts.push("");
   }
 
+  if (task.implementationPlan) {
+    parts.push("## Implementation Plan\n");
+    parts.push(task.implementationPlan + "\n");
+  }
+
   if (task.notes) {
-    parts.push("## Notes\n");
+    parts.push("## Implementation Notes\n");
     parts.push(task.notes + "\n");
+  }
+
+  if (task.finalSummary) {
+    parts.push("## Final Summary\n");
+    parts.push(task.finalSummary + "\n");
   }
 
   if (task.references.length > 0) {
@@ -198,6 +64,12 @@ function buildMarkdown(task: TaskData): string {
   if (task.documentation.length > 0) {
     parts.push("## Documentation\n");
     for (const doc of task.documentation) parts.push(`- ${doc}`);
+    parts.push("");
+  }
+
+  if (task.subtasks.length > 0) {
+    parts.push("## Subtasks\n");
+    for (const subtask of task.subtasks) parts.push(`- ${subtask}`);
     parts.push("");
   }
 
@@ -215,6 +87,17 @@ export async function setTaskStatus(taskId: string, status: string, projectDir: 
   }
 }
 
+export async function demoteTask(taskId: string, projectDir: string) {
+  await showToast({ style: Toast.Style.Animated, title: `Demoting ${taskId}...` });
+  try {
+    await runBacklog(["task", "demote", taskId], projectDir);
+    await showToast({ style: Toast.Style.Success, title: `${taskId} demoted to draft` });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await showToast({ style: Toast.Style.Failure, title: "Failed to demote", message: message.split("\n")[0] });
+  }
+}
+
 export default function TaskDetail({
   taskId,
   projectDir,
@@ -224,10 +107,10 @@ export default function TaskDetail({
   projectDir: string;
   onRefresh?: () => void;
 }) {
+  const projectName = getProjectName(getProjectConfig(), projectDir);
   const { isLoading, data, revalidate } = usePromise(
     async (id: string, cwd: string) => {
-      const stdout = await runBacklog(["task", "view", id, "--plain"], cwd);
-      return parseTaskView(stdout);
+      return loadTask(id, cwd);
     },
     [taskId, projectDir],
     {
@@ -259,6 +142,7 @@ export default function TaskDetail({
               text={task.priority || "none"}
               icon={{ source: Icon.Signal3, tintColor: PRIORITY_COLORS[task.priority] || Color.SecondaryText }}
             />
+            {task.parent ? <Detail.Metadata.Label title="Parent" text={task.parent} /> : null}
             {task.assignee ? <Detail.Metadata.Label title="Assignee" text={task.assignee} /> : null}
             {task.milestone ? <Detail.Metadata.Label title="Milestone" text={task.milestone} /> : null}
             {task.created ? <Detail.Metadata.Label title="Created" text={task.created} /> : null}
@@ -292,6 +176,7 @@ export default function TaskDetail({
               target={<EditTask task={task} projectDir={projectDir} onComplete={refresh} />}
             />
           )}
+          <OpenBrowserAction projectDir={projectDir} projectName={projectName} />
           {task?.filePath && <Action.Open title="Open Task File" target={task.filePath} icon={Icon.Document} />}
           <Action.CopyToClipboard title="Copy Task ID" content={taskId} />
           <Action

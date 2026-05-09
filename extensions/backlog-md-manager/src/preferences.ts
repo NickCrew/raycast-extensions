@@ -3,8 +3,6 @@ import { useCachedState } from "@raycast/utils";
 import { basename, resolve } from "path";
 import { homedir } from "os";
 
-// Use the auto-generated `Preferences` type from raycast-env.d.ts
-
 export interface ProjectConfig {
   backlogPath: string;
   projects: { name: string; path: string }[];
@@ -24,14 +22,18 @@ export function getProjectConfig(): ProjectConfig {
 
   const projects = prefs.projectDirectories
     .split(",")
-    .map((path: string) => path.trim())
+    .map((p) => p.trim())
     .filter(Boolean)
-    .map((path: string) => {
-      const full = expandPath(path);
+    .map((p) => {
+      const full = expandPath(p);
       return { name: basename(full), path: full };
     });
 
   return { backlogPath, projects };
+}
+
+export function getProjectName(config: ProjectConfig, projectPath?: string): string | undefined {
+  return config.projects.find((project) => project.path === projectPath)?.name;
 }
 
 export function useActiveProject(): [string, (path: string) => void, ProjectConfig] {

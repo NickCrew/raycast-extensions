@@ -1,8 +1,12 @@
 import { Form, ActionPanel, Action, showToast, Toast, popToRoot, Icon } from "@raycast/api";
 import { existsSync } from "fs";
-import { useState } from "react";
-import { runBacklog } from "./backlog";
+import { relative } from "path";
+import { useEffect, useState } from "react";
+import { BacklogTaskSummary, runBacklog } from "./backlog";
 import { useActiveProject } from "./preferences";
+import TaskPicker, { formatTaskOption } from "./task-picker";
+import MilestonePicker, { formatMilestoneOption } from "./milestone-picker";
+import { Milestone } from "./milestones-data";
 
 const PRIORITIES = [
   { title: "None", value: "" },
@@ -11,19 +15,46 @@ const PRIORITIES = [
   { title: "Low", value: "low" },
 ];
 
+interface CreateTaskValues extends Record<string, unknown> {
+  title: string;
+  description?: string;
+  priority?: string;
+  labels?: string;
+  assignee?: string;
+  isDraft?: boolean;
+  references?: string[];
+  documents?: string[];
+  noDodDefaults?: boolean;
+}
+
+function toProjectRelativePath(projectDir: string, filePath: string): string {
+  const relativePath = relative(projectDir, filePath);
+  return relativePath || ".";
+}
+
 export default function Command() {
   const [titleError, setTitleError] = useState<string | undefined>();
-  const [isSubmitting, setIsSubmitting] = useState(false);
   const [activeProject, setActiveProject, config] = useActiveProject();
+  const [parentTask, setParentTask] = useState<BacklogTaskSummary | undefined>();
+  const [dependencyTasks, setDependencyTasks] = useState<BacklogTaskSummary[]>([]);
+  const [milestone, setMilestone] = useState<Milestone | undefined>();
+  const [referenceFiles, setReferenceFiles] = useState<string[]>([]);
+  const [documentFiles, setDocumentFiles] = useState<string[]>([]);
 
   // Dynamic list fields
   const [acItems, setAcItems] = useState<string[]>([""]);
   const [dodItems, setDodItems] = useState<string[]>([]);
-  const [refItems, setRefItems] = useState<string[]>([""]);
-  const [docItems, setDocItems] = useState<string[]>([""]);
 
-  async function handleSubmit(values: Record<string, unknown>) {
-    const title = (values.title as string).trim();
+  useEffect(() => {
+    setParentTask(undefined);
+    setDependencyTasks([]);
+    setMilestone(undefined);
+    setReferenceFiles([]);
+    setDocumentFiles([]);
+  }, [activeProject]);
+
+  async function handleSubmit(values: CreateTaskValues) {
+    const title = (values.title || "").trim();
     if (!title) {
       setTitleError("Title is required");
       return;
@@ -61,28 +92,27 @@ export default function Command() {
     }
 
     // Parent task
-    const parent = (values.parent as string)?.trim();
-    if (parent) {
-      args.push("--parent", parent);
+    if (parentTask) {
+      args.push("--parent", parentTask.id);
     }
 
     // Dependencies
-    const dependsOn = (values.dependsOn as string)?.trim();
-    if (dependsOn) {
-      args.push("--depends-on", dependsOn);
+    if (dependencyTasks.length > 0) {
+      args.push("--depends-on", dependencyTasks.map((task) => task.id).join(","));
     }
 
-    // Notes
-    const notes = (values.notes as string)?.trim();
-    if (notes) {
-      args.push("--notes", notes);
+    // Milestone
+    if (milestone) {
+      args.push("--milestone", milestone.id);
     }
 
+    // Acceptance criteria (multiple --ac flags)
     for (let i = 0; i < acItems.length; i++) {
       const val = (values[`ac-${i}`] as string)?.trim();
       if (val) args.push("--ac", val);
     }
 
+    // Definition of Done (multiple --dod flags)
     if (values.noDodDefaults) {
       args.push("--no-dod-defaults");
     }
@@ -91,33 +121,31 @@ export default function Command() {
       if (val) args.push("--dod", val);
     }
 
-    for (let i = 0; i < refItems.length; i++) {
-      const val = (values[`ref-${i}`] as string)?.trim();
-      if (val) args.push("--ref", val);
-    }
-
-    for (let i = 0; i < docItems.length; i++) {
-      const val = (values[`doc-${i}`] as string)?.trim();
-      if (val) args.push("--doc", val);
-    }
-
-    const attachments = ((values.attachments as string[]) || []).filter((f) => existsSync(f));
-    for (const file of attachments) {
+    const references = ((values.references as string[]) || [])
+      .filter((file) => existsSync(file))
+      .map((file) => toProjectRelativePath(activeProject, file));
+    for (const file of references) {
       args.push("--ref", file);
+    }
+
+    const documents = ((values.documents as string[]) || [])
+      .filter((file) => existsSync(file))
+      .map((file) => toProjectRelativePath(activeProject, file));
+    for (const file of documents) {
+      args.push("--doc", file);
     }
 
     args.push("--plain");
 
     try {
-      setIsSubmitting(true);
-      showToast({ style: Toast.Style.Animated, title: "Creating task..." });
+      await showToast({ style: Toast.Style.Animated, title: "Creating task..." });
 
       const output = await runBacklog(args, activeProject);
 
       const idMatch = output.match(/(?:task|TASK)[-\s]?(\S+)/i);
       const taskId = idMatch ? idMatch[1] : undefined;
 
-      showToast({
+      await showToast({
         style: Toast.Style.Success,
         title: "Task created",
         message: taskId ? `Task ${taskId}` : undefined,
@@ -126,27 +154,65 @@ export default function Command() {
       popToRoot();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      showToast({
+      await showToast({
         style: Toast.Style.Failure,
         title: "Failed to create task",
         message: message.split("\n")[0],
       });
-    } finally {
-      setIsSubmitting(false);
     }
   }
 
   return (
     <Form
-      isLoading={isSubmitting}
       actions={
         <ActionPanel>
           <Action.SubmitForm title="Create Task" onSubmit={handleSubmit} />
           <ActionPanel.Section title="Add Fields">
+            <Action.Push
+              title={parentTask ? "Change Parent Task" : "Select Parent Task"}
+              icon={Icon.List}
+              shortcut={{ modifiers: ["cmd", "opt"], key: "p" }}
+              target={
+                <TaskPicker
+                  projectDir={activeProject}
+                  navigationTitle="Select Parent Task"
+                  actionTitle="Use as Parent Task"
+                  excludedTaskIds={dependencyTasks.map((task) => task.id)}
+                  onSelect={(task) => setParentTask(task)}
+                />
+              }
+            />
+            <Action.Push
+              title="Add Dependency"
+              icon={Icon.Plus}
+              shortcut={{ modifiers: ["cmd", "shift"], key: "p" }}
+              target={
+                <TaskPicker
+                  projectDir={activeProject}
+                  navigationTitle="Add Dependency"
+                  actionTitle="Add Dependency"
+                  excludedTaskIds={[...(parentTask ? [parentTask.id] : []), ...dependencyTasks.map((task) => task.id)]}
+                  onSelect={(task) => setDependencyTasks((current) => [...current, task])}
+                />
+              }
+            />
+            <Action.Push
+              title={milestone ? "Change Milestone" : "Set Milestone"}
+              icon={Icon.Bullseye}
+              shortcut={{ modifiers: ["cmd", "opt"], key: "m" }}
+              target={
+                <MilestonePicker
+                  projectDir={activeProject}
+                  navigationTitle="Select Milestone"
+                  actionTitle="Use as Milestone"
+                  onSelect={(m) => setMilestone(m)}
+                />
+              }
+            />
             <Action
               title="Add Acceptance Criterion"
               icon={Icon.Plus}
-              shortcut={{ modifiers: ["cmd"], key: "a" }}
+              shortcut={{ modifiers: ["cmd", "opt"], key: "a" }}
               onAction={() => setAcItems([...acItems, ""])}
             />
             <Action
@@ -155,20 +221,33 @@ export default function Command() {
               shortcut={{ modifiers: ["cmd"], key: "d" }}
               onAction={() => setDodItems([...dodItems, ""])}
             />
-            <Action
-              title="Add Reference"
-              icon={Icon.Plus}
-              shortcut={{ modifiers: ["cmd"], key: "r" }}
-              onAction={() => setRefItems([...refItems, ""])}
-            />
-            <Action
-              title="Add Documentation Link"
-              icon={Icon.Plus}
-              shortcut={{ modifiers: ["cmd", "shift"], key: "d" }}
-              onAction={() => setDocItems([...docItems, ""])}
-            />
           </ActionPanel.Section>
           <ActionPanel.Section title="Remove Fields">
+            {parentTask ? (
+              <Action
+                title="Clear Parent Task"
+                icon={Icon.Minus}
+                style={Action.Style.Destructive}
+                onAction={() => setParentTask(undefined)}
+              />
+            ) : null}
+            {dependencyTasks.length > 0 ? (
+              <Action
+                title="Remove Last Dependency"
+                icon={Icon.Minus}
+                style={Action.Style.Destructive}
+                shortcut={{ modifiers: ["opt", "shift"], key: "p" }}
+                onAction={() => setDependencyTasks((current) => current.slice(0, -1))}
+              />
+            ) : null}
+            {milestone ? (
+              <Action
+                title="Clear Milestone"
+                icon={Icon.Minus}
+                style={Action.Style.Destructive}
+                onAction={() => setMilestone(undefined)}
+              />
+            ) : null}
             <Action
               title="Remove Last Acceptance Criterion"
               icon={Icon.Minus}
@@ -182,20 +261,6 @@ export default function Command() {
               style={Action.Style.Destructive}
               shortcut={{ modifiers: ["opt", "shift"], key: "d" }}
               onAction={() => dodItems.length > 0 && setDodItems(dodItems.slice(0, -1))}
-            />
-            <Action
-              title="Remove Last Reference"
-              icon={Icon.Minus}
-              style={Action.Style.Destructive}
-              shortcut={{ modifiers: ["cmd", "shift"], key: "r" }}
-              onAction={() => refItems.length > 1 && setRefItems(refItems.slice(0, -1))}
-            />
-            <Action
-              title="Remove Last Documentation Link"
-              icon={Icon.Minus}
-              style={Action.Style.Destructive}
-              shortcut={{ modifiers: ["opt"], key: "d" }}
-              onAction={() => docItems.length > 1 && setDocItems(docItems.slice(0, -1))}
             />
           </ActionPanel.Section>
         </ActionPanel>
@@ -236,18 +301,34 @@ export default function Command() {
       <Form.Separator />
 
       {/* ── Relationships ── */}
-      <Form.TextField id="parent" title="Parent Task" placeholder="e.g. task-42" info="Parent task ID" />
-      <Form.TextField
-        id="dependsOn"
+      <Form.Description
+        key={`parent-${parentTask?.id ?? "none"}`}
+        title="Parent Task"
+        text={
+          parentTask
+            ? formatTaskOption(parentTask)
+            : "None selected. ⌘⌥P, or use Select Parent Task from the actions menu."
+        }
+      />
+      <Form.Description
+        key={`deps-${dependencyTasks.map((t) => t.id).join(",") || "none"}`}
         title="Depends On"
-        placeholder="task-1, task-2"
-        info="Comma-separated task IDs this task depends on"
+        text={
+          dependencyTasks.length > 0
+            ? dependencyTasks.map((task) => `- ${formatTaskOption(task)}`).join("\n")
+            : "None selected. ⌘⇧P, or use Add Dependency from the actions menu."
+        }
+      />
+      <Form.Description
+        key={`milestone-${milestone?.id ?? "none"}`}
+        title="Milestone"
+        text={milestone ? formatMilestoneOption(milestone) : "None. ⌘⌥M, or use Set Milestone from the actions menu."}
       />
 
       <Form.Separator />
 
       {/* ── Acceptance Criteria (dynamic) ── */}
-      <Form.Description text="Acceptance Criteria  ⌘A to add" />
+      <Form.Description text="Acceptance Criteria  ⌘⌥A to add" />
       {acItems.map((_, i) => (
         <Form.TextField key={`ac-${i}`} id={`ac-${i}`} title={`AC ${i + 1}`} placeholder="Criterion..." />
       ))}
@@ -261,32 +342,44 @@ export default function Command() {
 
       <Form.Separator />
 
-      {/* ── Notes ── */}
-      <Form.TextArea id="notes" title="Notes" placeholder="Implementation notes..." />
-
-      <Form.Separator />
-
-      {/* ── References (dynamic) ── */}
-      <Form.Description text="References  ⌘R to add" />
-      {refItems.map((_, i) => (
-        <Form.TextField key={`ref-${i}`} id={`ref-${i}`} title={`Ref ${i + 1}`} placeholder="URL or file path" />
-      ))}
-
-      {/* ── Documentation (dynamic) ── */}
-      <Form.Description text="Documentation  ⇧⌘D to add" />
-      {docItems.map((_, i) => (
-        <Form.TextField key={`doc-${i}`} id={`doc-${i}`} title={`Doc ${i + 1}`} placeholder="URL or file path" />
-      ))}
-
-      <Form.Separator />
-
-      {/* ── File Attachments ── */}
+      {/* ── References ── */}
       <Form.FilePicker
-        id="attachments"
-        title="Attachments"
+        id="references"
+        title="References"
+        value={referenceFiles}
+        onChange={setReferenceFiles}
         allowMultipleSelection
         canChooseDirectories={false}
-        info="Drag and drop screenshots or files — added as --ref"
+        info="Raycast chooses the picker folder; selected files are submitted as project-relative --ref paths"
+      />
+      <Form.Description
+        title="Selected References"
+        text={
+          referenceFiles.length > 0
+            ? referenceFiles.map((file) => `- \`${toProjectRelativePath(activeProject, file)}\``).join("\n")
+            : "No references selected yet."
+        }
+      />
+
+      <Form.Separator />
+
+      {/* ── Documents ── */}
+      <Form.FilePicker
+        id="documents"
+        title="Documents"
+        value={documentFiles}
+        onChange={setDocumentFiles}
+        allowMultipleSelection
+        canChooseDirectories={false}
+        info="Raycast chooses the picker folder; selected files are submitted as project-relative --doc paths"
+      />
+      <Form.Description
+        title="Selected Documents"
+        text={
+          documentFiles.length > 0
+            ? documentFiles.map((file) => `- \`${toProjectRelativePath(activeProject, file)}\``).join("\n")
+            : "No documents selected yet."
+        }
       />
     </Form>
   );

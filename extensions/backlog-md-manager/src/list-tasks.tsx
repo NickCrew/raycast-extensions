@@ -1,16 +1,11 @@
-import { List, ActionPanel, Action, Icon, Color, showToast, Toast } from "@raycast/api";
+import { List, ActionPanel, Action, Icon, Color, showToast, Toast, confirmAlert, Alert } from "@raycast/api";
 import { usePromise } from "@raycast/utils";
 import { useState } from "react";
-import TaskDetail, { setTaskStatus } from "./task-detail";
-import { useActiveProject } from "./preferences";
-import { runBacklog } from "./backlog";
-
-interface Task {
-  id: string;
-  title: string;
-  priority: string;
-  status: string;
-}
+import { EditTaskLoader } from "./edit-task";
+import { OpenBrowserAction } from "./open-browser";
+import TaskDetail, { demoteTask, setTaskStatus } from "./task-detail";
+import { getProjectName, useActiveProject } from "./preferences";
+import { BacklogTaskSummary, listTaskSummaries } from "./backlog";
 
 const STATUS_ICONS: Record<string, { icon: Icon; color: Color }> = {
   "to do": { icon: Icon.Circle, color: Color.SecondaryText },
@@ -28,49 +23,12 @@ const PRIORITY_TAGS: Record<string, Color> = {
 const FILTER_OPTIONS = ["All", "To Do", "In Progress", "Done", "Blocked"];
 const PRIORITY_FILTERS = ["All", "High", "Medium", "Low"];
 
-function parseTaskList(output: string): Record<string, Task[]> {
-  const sections: Record<string, Task[]> = {};
-  let currentStatus = "";
-
-  for (const line of output.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-
-    if (trimmed.endsWith(":") && !trimmed.startsWith("[")) {
-      currentStatus = trimmed.slice(0, -1);
-      sections[currentStatus] = [];
-      continue;
-    }
-
-    const match = trimmed.match(/^\[(\w+)\]\s+([\w-]+)\s+-\s+(.+)$/);
-    if (match && currentStatus) {
-      sections[currentStatus] = sections[currentStatus] || [];
-      sections[currentStatus].push({
-        priority: match[1].toLowerCase(),
-        id: match[2],
-        title: match[3],
-        status: currentStatus,
-      });
-    }
-  }
-
-  return sections;
-}
-
-function getEmptyView(sections: Record<string, Task[]>, isLoading: boolean, projectCount: number) {
-  if (isLoading) return undefined;
-
-  if (projectCount === 0) {
-    return (
-      <List.EmptyView title="No project configured" description="Set a Backlog.md project directory in preferences." />
-    );
-  }
-
-  if (Object.keys(sections).length === 0) {
-    return <List.EmptyView title="No tasks found" description="This project does not have any visible tasks." />;
-  }
-
-  return undefined;
+function groupTasksByStatus(tasks: BacklogTaskSummary[]): Record<string, BacklogTaskSummary[]> {
+  return tasks.reduce<Record<string, BacklogTaskSummary[]>>((sections, task) => {
+    sections[task.status] = sections[task.status] || [];
+    sections[task.status].push(task);
+    return sections;
+  }, {});
 }
 
 export default function Command() {
@@ -81,12 +39,8 @@ export default function Command() {
 
   const { isLoading, data, revalidate } = usePromise(
     async (cwd: string, status: string, priority: string) => {
-      const args = ["task", "list", "--plain"];
-      if (status !== "All") args.push("--status", status.toLowerCase());
-      if (priority !== "All") args.push("--priority", priority.toLowerCase());
-
-      const stdout = await runBacklog(args, cwd);
-      return parseTaskList(stdout);
+      const tasks = await listTaskSummaries(cwd, { status, priority });
+      return groupTasksByStatus(tasks);
     },
     [activeProject, statusFilter, priorityFilter],
     {
@@ -98,7 +52,7 @@ export default function Command() {
   );
 
   const sections = data || {};
-  const emptyView = getEmptyView(sections, isLoading, config.projects.length);
+  const projectName = getProjectName(config, activeProject);
 
   return (
     <List
@@ -122,7 +76,6 @@ export default function Command() {
         ) : undefined
       }
     >
-      {emptyView}
       {Object.entries(sections).map(([status, tasks]) => (
         <List.Section key={status} title={status} subtitle={`${tasks.length}`}>
           {tasks.map((task) => {
@@ -147,12 +100,34 @@ export default function Command() {
                       icon={Icon.Eye}
                       target={<TaskDetail taskId={task.id} projectDir={activeProject} onRefresh={revalidate} />}
                     />
+                    <Action.Push
+                      title="Edit Task"
+                      icon={Icon.Pencil}
+                      shortcut={{ modifiers: ["cmd"], key: "e" }}
+                      target={<EditTaskLoader taskId={task.id} projectDir={activeProject} onComplete={revalidate} />}
+                    />
+                    <OpenBrowserAction projectDir={activeProject} projectName={projectName} />
                     <Action.CopyToClipboard title="Copy Task ID" content={task.id} />
                     <Action
                       title="Refresh"
                       icon={Icon.ArrowClockwise}
                       shortcut={{ modifiers: ["cmd"], key: "r" }}
                       onAction={revalidate}
+                    />
+                    <Action
+                      title="Demote to Draft"
+                      icon={Icon.ArrowDown}
+                      style={Action.Style.Destructive}
+                      onAction={async () => {
+                        const ok = await confirmAlert({
+                          title: "Demote to draft?",
+                          message: `${task.id} will be moved back to drafts and removed from the active task list.`,
+                          primaryAction: { title: "Demote", style: Alert.ActionStyle.Destructive },
+                        });
+                        if (!ok) return;
+                        await demoteTask(task.id, activeProject);
+                        revalidate();
+                      }}
                     />
                     <ActionPanel.Section title="Set Status">
                       {task.status.toLowerCase() !== "in progress" && (

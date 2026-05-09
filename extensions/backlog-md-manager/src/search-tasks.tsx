@@ -1,8 +1,10 @@
-import { List, ActionPanel, Action, Icon, Color, showToast, Toast } from "@raycast/api";
+import { List, ActionPanel, Action, Icon, Color, showToast, Toast, confirmAlert, Alert } from "@raycast/api";
 import { usePromise } from "@raycast/utils";
 import { useState } from "react";
-import TaskDetail from "./task-detail";
-import { useActiveProject } from "./preferences";
+import { EditTaskLoader } from "./edit-task";
+import { OpenBrowserAction } from "./open-browser";
+import TaskDetail, { demoteTask } from "./task-detail";
+import { getProjectName, useActiveProject } from "./preferences";
 import { runBacklog } from "./backlog";
 
 interface SearchResult {
@@ -59,26 +61,6 @@ function parseSearchResults(output: string): SearchResult[] {
   return results;
 }
 
-function getEmptyView(results: SearchResult[], isLoading: boolean, query: string, projectCount: number) {
-  if (isLoading) return undefined;
-
-  if (projectCount === 0) {
-    return (
-      <List.EmptyView title="No project configured" description="Set a Backlog.md project directory in preferences." />
-    );
-  }
-
-  if (!query) {
-    return <List.EmptyView title="Search tasks" description="Type a query to search across the selected project." />;
-  }
-
-  if (results.length === 0) {
-    return <List.EmptyView title="No matches found" description="Try a different search term." />;
-  }
-
-  return undefined;
-}
-
 export default function Command() {
   const [activeProject, setActiveProject, config] = useActiveProject();
   const [searchText, setSearchText] = useState("");
@@ -99,7 +81,7 @@ export default function Command() {
   );
 
   const results = data || [];
-  const emptyView = getEmptyView(results, isLoading, searchText, config.projects.length);
+  const projectName = getProjectName(config, activeProject);
 
   return (
     <List
@@ -118,7 +100,6 @@ export default function Command() {
         ) : undefined
       }
     >
-      {emptyView}
       {results.map((result) => {
         const priorityColor = PRIORITY_TAGS[result.priority] || Color.SecondaryText;
 
@@ -138,7 +119,29 @@ export default function Command() {
                   icon={Icon.Eye}
                   target={<TaskDetail taskId={result.id} projectDir={activeProject} onRefresh={revalidate} />}
                 />
+                <Action.Push
+                  title="Edit Task"
+                  icon={Icon.Pencil}
+                  shortcut={{ modifiers: ["cmd"], key: "e" }}
+                  target={<EditTaskLoader taskId={result.id} projectDir={activeProject} onComplete={revalidate} />}
+                />
+                <OpenBrowserAction projectDir={activeProject} projectName={projectName} />
                 <Action.CopyToClipboard title="Copy Task ID" content={result.id} />
+                <Action
+                  title="Demote to Draft"
+                  icon={Icon.ArrowDown}
+                  style={Action.Style.Destructive}
+                  onAction={async () => {
+                    const ok = await confirmAlert({
+                      title: "Demote to draft?",
+                      message: `${result.id} will be moved back to drafts and removed from the active task list.`,
+                      primaryAction: { title: "Demote", style: Alert.ActionStyle.Destructive },
+                    });
+                    if (!ok) return;
+                    await demoteTask(result.id, activeProject);
+                    revalidate();
+                  }}
+                />
               </ActionPanel>
             }
           />
